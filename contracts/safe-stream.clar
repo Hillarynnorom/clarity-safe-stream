@@ -6,11 +6,13 @@
 (define-constant err-invalid-params (err u101))
 (define-constant err-policy-not-found (err u102))
 (define-constant err-insufficient-funds (err u103))
+(define-constant err-policy-expired (err u104))
 
 ;; Data Variables
 (define-data-var min-premium uint u100000) ;; in STX
 (define-data-var claim-threshold uint u500000) ;; min income drop %
 (define-data-var pool-balance uint u0)
+(define-data-var policy-duration uint u5256) ;; ~1 year in blocks
 
 ;; Data Maps
 (define-map policies
@@ -27,6 +29,11 @@
 (define-map verified-sources
   (string-ascii 64) 
   bool
+)
+
+;; Private Functions
+(define-private (is-policy-expired (last-payment uint))
+  (> block-height (+ last-payment (var-get policy-duration)))
 )
 
 ;; Public Functions
@@ -50,6 +57,7 @@
   )
     (begin
       (asserts! (is-eq (get active policy) true) err-unauthorized)
+      (asserts! (not (is-policy-expired (get last-payment policy))) err-policy-expired)
       (try! (stx-transfer? (get premium policy) tx-sender (as-contract tx-sender)))
       (var-set pool-balance (+ (var-get pool-balance) (get premium policy)))
       (ok (map-set policies tx-sender (merge policy { last-payment: block-height })))
@@ -64,6 +72,7 @@
   )
     (begin
       (asserts! (is-eq (get active policy) true) err-unauthorized)
+      (asserts! (not (is-policy-expired (get last-payment policy))) err-policy-expired)
       (asserts! (< income threshold-amount) err-invalid-params)
       (try! (as-contract (stx-transfer? (get coverage policy) tx-sender tx-sender)))
       (var-set pool-balance (- (var-get pool-balance) (get coverage policy)))

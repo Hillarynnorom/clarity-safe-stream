@@ -54,9 +54,12 @@ Clarinet.test({
 });
 
 Clarinet.test({
-  name: "Ensures valid claims can be processed",
+  name: "Ensures expired policies cannot process claims",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const user1 = accounts.get("wallet_1")!;
+    
+    // Fast forward chain beyond policy expiration
+    chain.mineEmptyBlockUntil(6000);
     
     let block = chain.mineBlock([
       Tx.contractCall(
@@ -68,6 +71,6 @@ Clarinet.test({
     ]);
 
     assertEquals(block.receipts.length, 1);
-    block.receipts[0].result.expectOk().expectBool(true);
+    block.receipts[0].result.expectErr(104); // err-policy-expired
   },
 });
