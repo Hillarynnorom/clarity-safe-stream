@@ -7,12 +7,17 @@
 (define-constant err-policy-not-found (err u102))
 (define-constant err-insufficient-funds (err u103))
 (define-constant err-policy-expired (err u104))
+(define-constant err-pool-capacity (err u105))
+(define-constant err-contract-paused (err u106))
 
 ;; Data Variables
 (define-data-var min-premium uint u100000) ;; in STX
 (define-data-var claim-threshold uint u500000) ;; min income drop %
 (define-data-var pool-balance uint u0)
 (define-data-var policy-duration uint u5256) ;; ~1 year in blocks
+(define-data-var total-coverage uint u0)
+(define-data-var max-coverage-ratio uint u800000) ;; 80% maximum coverage ratio
+(define-data-var contract-paused bool false)
 
 ;; Data Maps
 (define-map policies
@@ -22,7 +27,8 @@
     coverage: uint,
     last-payment: uint,
     income-source: (string-ascii 64),
-    active: bool
+    active: bool,
+    total-paid: uint
   }
 )
 
@@ -36,17 +42,26 @@
   (> block-height (+ last-payment (var-get policy-duration)))
 )
 
+(define-private (check-pool-capacity (new-coverage uint))
+  (<= (+ (var-get total-coverage) new-coverage)
+      (* (var-get pool-balance) (var-get max-coverage-ratio)))
+)
+
 ;; Public Functions
 (define-public (create-policy (premium uint) (coverage uint) (income-source (string-ascii 64)))
   (begin
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (>= premium (var-get min-premium)) err-invalid-params)
     (asserts! (map-get? verified-sources income-source) err-invalid-params)
+    (asserts! (check-pool-capacity coverage) err-pool-capacity)
+    (var-set total-coverage (+ (var-get total-coverage) coverage))
     (ok (map-set policies tx-sender {
       premium: premium,
       coverage: coverage,
       last-payment: block-height,
       income-source: income-source,
-      active: true
+      active: true,
+      total-paid: u0
     }))
   )
 )
@@ -56,11 +71,28 @@
     (policy (unwrap! (map-get? policies tx-sender) err-policy-not-found))
   )
     (begin
+      (asserts! (not (var-get contract-paused)) err-contract-paused)
       (asserts! (is-eq (get active policy) true) err-unauthorized)
       (asserts! (not (is-policy-expired (get last-payment policy))) err-policy-expired)
       (try! (stx-transfer? (get premium policy) tx-sender (as-contract tx-sender)))
       (var-set pool-balance (+ (var-get pool-balance) (get premium policy)))
-      (ok (map-set policies tx-sender (merge policy { last-payment: block-height })))
+      (ok (map-set policies tx-sender (merge policy { 
+        last-payment: block-height,
+        total-paid: (+ (get total-paid policy) (get premium policy))
+      })))
+    )
+  )
+)
+
+(define-public (cancel-policy)
+  (let (
+    (policy (unwrap! (map-get? policies tx-sender) err-policy-not-found))
+  )
+    (begin
+      (asserts! (not (var-get contract-paused)) err-contract-paused)
+      (asserts! (is-eq (get active policy) true) err-unauthorized)
+      (var-set total-coverage (- (var-get total-coverage) (get coverage policy)))
+      (ok (map-set policies tx-sender (merge policy { active: false })))
     )
   )
 )
@@ -71,12 +103,15 @@
     (threshold-amount (* (get coverage policy) (var-get claim-threshold)))
   )
     (begin
+      (asserts! (not (var-get contract-paused)) err-contract-paused)
       (asserts! (is-eq (get active policy) true) err-unauthorized)
       (asserts! (not (is-policy-expired (get last-payment policy))) err-policy-expired)
       (asserts! (< income threshold-amount) err-invalid-params)
+      (asserts! (<= (get coverage policy) (var-get pool-balance)) err-insufficient-funds)
       (try! (as-contract (stx-transfer? (get coverage policy) tx-sender tx-sender)))
       (var-set pool-balance (- (var-get pool-balance) (get coverage policy)))
-      (ok true)
+      (var-set total-coverage (- (var-get total-coverage) (get coverage policy)))
+      (ok (map-set policies tx-sender (merge policy { active: false })))
     )
   )
 )
@@ -86,5 +121,12 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
     (ok (map-set verified-sources source true))
+  )
+)
+
+(define-public (set-contract-pause (paused bool))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (ok (var-set contract-paused paused))
   )
 )
