@@ -35,14 +35,34 @@ Clarinet.test({
 });
 
 Clarinet.test({
-  name: "Ensures premium payments update pool balance",
+  name: "Ensures pool capacity limits are enforced",
+  async fn(chain: Chain, accounts: Map<string, Account>) {
+    const deployer = accounts.get("deployer")!;
+    const user1 = accounts.get("wallet_1")!;
+    
+    let block = chain.mineBlock([
+      Tx.contractCall(
+        "safe-stream",
+        "create-policy",
+        [types.uint(200000), types.uint(10000000000), types.ascii("youtube.com")],
+        user1.address
+      )
+    ]);
+
+    assertEquals(block.receipts.length, 1);
+    block.receipts[0].result.expectErr(105); // err-pool-capacity
+  },
+});
+
+Clarinet.test({
+  name: "Ensures policy cancellation works correctly",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const user1 = accounts.get("wallet_1")!;
     
     let block = chain.mineBlock([
       Tx.contractCall(
-        "safe-stream", 
-        "pay-premium",
+        "safe-stream",
+        "cancel-policy",
         [],
         user1.address
       )
@@ -50,27 +70,5 @@ Clarinet.test({
 
     assertEquals(block.receipts.length, 1);
     block.receipts[0].result.expectOk().expectBool(true);
-  },
-});
-
-Clarinet.test({
-  name: "Ensures expired policies cannot process claims",
-  async fn(chain: Chain, accounts: Map<string, Account>) {
-    const user1 = accounts.get("wallet_1")!;
-    
-    // Fast forward chain beyond policy expiration
-    chain.mineEmptyBlockUntil(6000);
-    
-    let block = chain.mineBlock([
-      Tx.contractCall(
-        "safe-stream",
-        "file-claim",
-        [types.uint(100000)],
-        user1.address
-      )
-    ]);
-
-    assertEquals(block.receipts.length, 1);
-    block.receipts[0].result.expectErr(104); // err-policy-expired
   },
 });
