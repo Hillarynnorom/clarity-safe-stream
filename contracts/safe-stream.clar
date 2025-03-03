@@ -9,14 +9,15 @@
 (define-constant err-policy-expired (err u104))
 (define-constant err-pool-capacity (err u105))
 (define-constant err-contract-paused (err u106))
+(define-constant err-arithmetic (err u107))
 
 ;; Data Variables
-(define-data-var min-premium uint u100000) ;; in STX
-(define-data-var claim-threshold uint u500000) ;; min income drop %
+(define-data-var min-premium uint u100000)
+(define-data-var claim-threshold uint u500000)
 (define-data-var pool-balance uint u0)
-(define-data-var policy-duration uint u5256) ;; ~1 year in blocks
+(define-data-var policy-duration uint u5256)
 (define-data-var total-coverage uint u0)
-(define-data-var max-coverage-ratio uint u800000) ;; 80% maximum coverage ratio
+(define-data-var max-coverage-ratio uint u800000)
 (define-data-var contract-paused bool false)
 
 ;; Data Maps
@@ -43,8 +44,10 @@
 )
 
 (define-private (check-pool-capacity (new-coverage uint))
-  (<= (+ (var-get total-coverage) new-coverage)
-      (* (var-get pool-balance) (var-get max-coverage-ratio)))
+  (match (to-uint (* (var-get pool-balance) (var-get max-coverage-ratio)))
+    success (ok (<= (+ (var-get total-coverage) new-coverage) success))
+    error err-arithmetic
+  )
 )
 
 ;; Public Functions
@@ -53,7 +56,7 @@
     (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (>= premium (var-get min-premium)) err-invalid-params)
     (asserts! (map-get? verified-sources income-source) err-invalid-params)
-    (asserts! (check-pool-capacity coverage) err-pool-capacity)
+    (asserts! (unwrap! (check-pool-capacity coverage) err-arithmetic) err-pool-capacity)
     (var-set total-coverage (+ (var-get total-coverage) coverage))
     (ok (map-set policies tx-sender {
       premium: premium,
@@ -84,19 +87,6 @@
   )
 )
 
-(define-public (cancel-policy)
-  (let (
-    (policy (unwrap! (map-get? policies tx-sender) err-policy-not-found))
-  )
-    (begin
-      (asserts! (not (var-get contract-paused)) err-contract-paused)
-      (asserts! (is-eq (get active policy) true) err-unauthorized)
-      (var-set total-coverage (- (var-get total-coverage) (get coverage policy)))
-      (ok (map-set policies tx-sender (merge policy { active: false })))
-    )
-  )
-)
-
 (define-public (file-claim (income uint))
   (let (
     (policy (unwrap! (map-get? policies tx-sender) err-policy-not-found))
@@ -108,25 +98,24 @@
       (asserts! (not (is-policy-expired (get last-payment policy))) err-policy-expired)
       (asserts! (< income threshold-amount) err-invalid-params)
       (asserts! (<= (get coverage policy) (var-get pool-balance)) err-insufficient-funds)
-      (try! (as-contract (stx-transfer? (get coverage policy) tx-sender tx-sender)))
+      ;; Update state before transfer
       (var-set pool-balance (- (var-get pool-balance) (get coverage policy)))
       (var-set total-coverage (- (var-get total-coverage) (get coverage policy)))
-      (ok (map-set policies tx-sender (merge policy { active: false })))
+      (map-set policies tx-sender (merge policy { active: false }))
+      ;; Perform transfer last
+      (try! (as-contract (stx-transfer? (get coverage policy) (as-contract tx-sender) tx-sender)))
+      (ok true)
     )
   )
 )
 
 ;; Admin Functions
-(define-public (add-verified-source (source (string-ascii 64)))
+(define-public (withdraw-excess-funds (amount uint))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
-    (ok (map-set verified-sources source true))
-  )
-)
-
-(define-public (set-contract-pause (paused bool))
-  (begin
-    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
-    (ok (var-set contract-paused paused))
+    (asserts! (<= amount (- (var-get pool-balance) (/ (var-get total-coverage) (var-get max-coverage-ratio)))) err-insufficient-funds)
+    (var-set pool-balance (- (var-get pool-balance) amount))
+    (try! (as-contract (stx-transfer? amount (as-contract tx-sender) contract-owner)))
+    (ok true)
   )
 )
